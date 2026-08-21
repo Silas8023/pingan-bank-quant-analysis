@@ -187,9 +187,11 @@ def plot_technical_chart(df: pd.DataFrame, title: str, out_path, font_family=Non
 
     fig.subplots_adjust(hspace=0.38, top=0.93, bottom=0.07, left=0.065, right=0.945)
     fig.suptitle(title, fontsize=19, fontweight="bold", color="#222222")
-    fig.savefig(out_path, dpi=cfg.DPI, facecolor="white")
-    plt.close(fig)
-    return out_path
+    if out_path:
+        fig.savefig(out_path, dpi=cfg.DPI, facecolor="white")
+        plt.close(fig)
+        return out_path
+    return fig
 
 
 def plot_backtest_chart(bt: dict, title: str, out_path):

@@ -15,12 +15,17 @@ from pathlib import Path
 import pandas as pd
 
 from stock_analysis import config as cfg
-from stock_analysis.backtest import run_dual_ma_backtest
+from stock_analysis.backtest import compare_sizing, run_dual_ma_backtest
 from stock_analysis.charting import plot_backtest_chart, plot_technical_chart, setup_chinese_font
 from stock_analysis.data_fetcher import fetch_stock_data, fetch_stock_name, resolve_symbol
 from stock_analysis.indicators import add_all
+from stock_analysis.macro import macro_correlation
+from stock_analysis.ml_forecast import predict_direction
 from stock_analysis.report import write_report
+from stock_analysis.sentiment import sentiment_series
 from stock_analysis.stats import compute_stats, stats_table
+from stock_analysis.storage import StockDB
+from stock_analysis.timeseries import arima_returns, garch_volatility
 
 
 def parse_args():
@@ -31,6 +36,12 @@ def parse_args():
     parser.add_argument("--fast", type=int, default=cfg.BT_FAST, help="双均线快线周期")
     parser.add_argument("--slow", type=int, default=cfg.BT_SLOW, help="双均线慢线周期")
     parser.add_argument("--out-dir", type=Path, default=cfg.OUTPUT_DIR, help="输出目录")
+    parser.add_argument("--ml", action="store_true", help="运行机器学习预测（次日涨跌）")
+    parser.add_argument("--ts", action="store_true", help="运行 ARIMA/GARCH 时间序列建模")
+    parser.add_argument("--macro", action="store_true", help="宏观数据相关性分析")
+    parser.add_argument("--sentiment", action="store_true", help="新闻情绪分析")
+    parser.add_argument("--db", action="store_true", help="SQLite 入库与自动更新")
+    parser.add_argument("--all", action="store_true", help="运行全部增强模块")
     return parser.parse_args()
 
 
@@ -77,6 +88,68 @@ def main():
         print(pd.DataFrame(bt["trades"]).to_string(index=False))
     else:
         print("\n[交易明细] 区间内没有完整交易")
+
+    # ---- 增强模块 ----
+    if args.all or (args.ml or args.ts or args.macro or args.sentiment or args.db):
+        print("\n===== 增强分析模块 =====")
+
+    if args.all:
+        print("\n[仓位管理对比]")
+        print(compare_sizing(df, args.fast, args.slow).to_string(index=False))
+
+    if args.all or args.ml:
+        print("\n[机器学习预测 · 次日涨跌]")
+        try:
+            ml = predict_direction(df)
+            print(f"模型：{ml['model_type']} | 训练 {ml['train_size']} / 测试 {ml['test_size']}")
+            print(f"准确率 {ml['accuracy']:.2%} | AUC {ml['auc']:.3f} | 双均线对照命中率 {ml['ma_benchmark_accuracy']:.2%}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"ML 预测失败：{exc}")
+
+    if args.all or args.ts:
+        print("\n[ARIMA 收益建模]")
+        try:
+            ar = arima_returns(df)
+            print(f"AIC {ar['aic']:.1f} | BIC {ar['bic']:.1f} | 未来5日收益均值(%) {ar['forecast_mean_pct']}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"ARIMA 失败：{exc}")
+        print("[GARCH 波动率建模]")
+        try:
+            gc = garch_volatility(df)
+            print(f"当前年化波动 {gc['last_annualized_vol_pct']}% | 未来5日年化波动(%) {gc['forecast_annualized_vol_pct']}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"GARCH 失败：{exc}")
+
+    if args.all or args.macro:
+        print("\n[宏观相关性 · CPI/PMI/LPR vs 平安银行月收益]")
+        try:
+            mc = macro_correlation(df, code=args.code)
+            if not mc["correlation"].empty:
+                print(mc["correlation"].to_string())
+                for macro_name, ols in mc["ols"].items():
+                    print(f"{macro_name}: 系数 {ols.get('coef')} | p值 {ols.get('p_value')} | R² {ols.get('r2')}")
+            else:
+                print("宏观数据样本不足或获取失败")
+        except Exception as exc:  # noqa: BLE001
+            print(f"宏观分析失败：{exc}")
+
+    if args.all or args.sentiment:
+        print("\n[新闻情绪分析]")
+        try:
+            se = sentiment_series(df, args.code)
+            print(se.get("message", se.get("message", "无数据")))
+        except Exception as exc:  # noqa: BLE001
+            print(f"情绪分析失败：{exc}")
+
+    if args.all or args.db:
+        print("\n[SQLite 存储与自动更新]")
+        try:
+            db = StockDB(args.out_dir / "pingan.db")
+            info = db.auto_update(args.code, args.months, cfg.ADJUST)
+            print(f"入库 {info['inserted_or_updated']} 行，库内共 {info['total_rows']} 行 -> {info['db_path']}")
+            db.close()
+        except Exception as exc:  # noqa: BLE001
+            print(f"SQLite 失败：{exc}")
 
     # 6. 绘图与报告
     font_family = setup_chinese_font()
